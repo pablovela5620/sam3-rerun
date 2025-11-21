@@ -1,0 +1,274 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+import os
+from dataclasses import dataclass
+from glob import glob
+from pathlib import Path
+from typing import Literal
+
+import cv2
+import numpy as np
+import rerun as rr
+import rerun.blueprint as rrb
+import torch
+from jaxtyping import Float32, Int, UInt8
+from numpy import ndarray
+from simplecv.rerun_log_utils import RerunTyroConfig
+from tqdm import tqdm
+from yacs.config import CfgNode
+
+from sam3d_body.api.vis_utils import visualize_sample_together
+from sam3d_body.build_models import load_sam_3d_body
+from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
+from sam3d_body.models.meta_arch import SAM3DBody
+from sam3d_body.new_sam_3d_body_estimator import PosePrediction, SAM3DBodyEstimator
+
+
+def compute_vertex_normals(
+    verts: Float32[ndarray, "n_verts 3"],
+    faces: Int[ndarray, "n_faces 3"],
+    eps: float = 1e-12,
+) -> Float32[ndarray, "n_verts 3"]:
+    """Compute per-vertex normals for a single mesh.
+
+    Args:
+        verts: Float32 array of vertex positions with shape ``(n_verts, 3)``.
+        faces: Int array of triangle indices with shape ``(n_faces, 3)``.
+        eps: Small epsilon to avoid division by zero when normalizing.
+
+    Returns:
+        Float32 array of unit vertex normals with shape ``(n_verts, 3)``; zeros for degenerate vertices.
+    """
+
+    # Expand faces to vertex triplets and fetch their positions.
+    faces_i: Int[ndarray, "n_faces 3"] = faces.astype(np.int64)
+    v0: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 0]]
+    v1: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 1]]
+    v2: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 2]]
+
+    # Face normal = cross(edge1, edge2).
+    e1: Float32[ndarray, "n_faces 3"] = v1 - v0
+    e2: Float32[ndarray, "n_faces 3"] = v2 - v0
+    face_normals: Float32[ndarray, "n_faces 3"] = np.cross(e1, e2)
+
+    # Accumulate each face normal into its three vertices with a vectorized scatter-add.
+    vertex_normals: Float32[ndarray, "n_verts 3"] = np.zeros_like(verts, dtype=np.float32)
+    flat_indices: Int[ndarray, "n_faces3"] = faces_i.reshape(-1)
+    face_normals_repeated: Float32[ndarray, "n_faces3 3"] = np.repeat(face_normals, 3, axis=0)
+    np.add.at(vertex_normals, flat_indices, face_normals_repeated)
+
+    norms: Float32[ndarray, "n_verts 1"] = np.linalg.norm(vertex_normals, axis=-1, keepdims=True)
+    denom: Float32[ndarray, "n_verts 1"] = np.maximum(norms, eps).astype(np.float32)
+    vn_unit: Float32[ndarray, "n_verts 3"] = (vertex_normals / denom).astype(np.float32)
+    mask: ndarray = norms > eps
+    vn_unit = np.where(mask, vn_unit, np.float32(0.0))
+    return vn_unit
+
+
+@dataclass
+class Sam3DBodyConfig:
+    """
+    Configure the demo entrypoint.
+
+    Attributes:
+        mhr_path: Path to the MHR mesh/pose asset file required by the head network.
+        detector_path: Optional local checkpoint for the human detector; empty to use default weights.
+        segmentor_path: Optional local checkpoint for the SAM-based human segmentor; empty to use default weights.
+        image_folder: Directory containing input images to process.
+        output_folder: Directory where rendered visualizations will be saved.
+        checkpoint_path: Core SAM 3D Body model checkpoint (.ckpt).
+        detector_name: Human detector backbone to load (None disables detection and uses full-image box).
+        segmentor_name: Segmentor name used when `segmentor_path` is provided.
+        fov_name: FOV estimator name (None disables FOV estimation and uses default intrinsics).
+        bbox_thresh: Confidence threshold for detector boxes.
+        use_mask: Whether to request mask-conditioned inference (requires `segmentor_path` / SAM).
+    """
+
+    rr_config: RerunTyroConfig
+    mhr_path: Path = Path("checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt")
+    detector_path: str = ""
+    segmentor_path: str = ""
+    image_folder: Path = Path("data/test-input/")
+    output_folder: Path = Path("data/test-outputs/")
+    checkpoint_path: Path = Path("checkpoints/sam-3d-body-dinov3/model.ckpt")
+    detector_name: Literal["vitdet"] | None = "vitdet"
+    segmentor_name: Literal["sam2"] | None = "sam2"
+    fov_name: Literal["moge2"] | None = "moge2"
+    bbox_thresh: float = 0.8
+    use_mask: bool = False
+
+
+def set_annotation_context() -> None:
+    """Register MHR-70 semantic metadata so subsequent logs show names/edges."""
+    rr.log(
+        "/",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="MHR-70", color=(0, 0, 255)),
+                    keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in MHR70_ID2NAME.items()],
+                    keypoint_connections=MHR70_LINKS,
+                ),
+            ]
+        ),
+        static=True,
+    )
+
+
+def visualize_sample(
+    outputs: list[PosePrediction], image_path: str, parent_log_path: Path, faces: Int[ndarray, "n_faces 3"]
+) -> None:
+    bgr_image: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
+    cam_log_path: Path = parent_log_path / "cam"
+    pinhole_log_path: Path = cam_log_path / "pinhole"
+    image_log_path: Path = pinhole_log_path / "image"
+    pred_log_path: Path = pinhole_log_path / "pred"
+    # clear the previous pred logs
+    rr.log(f"{pred_log_path}", rr.Clear(recursive=True))
+    rr.log(f"{image_log_path}", rr.Image(bgr_image, color_model=rr.ColorModel.BGR))
+
+    mesh_root_path: Path = parent_log_path / "pred"
+    rr.log(str(mesh_root_path), rr.Clear(recursive=True))
+
+    for i, output in enumerate(outputs):
+        rr.log(f"{pred_log_path}/bbox_{i}", rr.Boxes2D(array=output["bbox"], array_format=rr.Box2DFormat.XYXY))
+        rr.log(
+            f"{pred_log_path}/lbbox_{i}",
+            rr.Boxes2D(array=output["lhand_bbox"], array_format=rr.Box2DFormat.XYXY),
+        )
+        rr.log(
+            f"{pred_log_path}/rbbox_{i}",
+            rr.Boxes2D(array=output["rhand_bbox"], array_format=rr.Box2DFormat.XYXY),
+        )
+        rr.log(
+            f"{pred_log_path}/uv_{i}",
+            rr.Points2D(
+                positions=output["pred_keypoints_2d"],
+                keypoint_ids=MHR70_IDS,
+                class_ids=0,
+            ),
+        )
+
+        # Log 3D keypoints in world coordinates
+        kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(
+            output["pred_keypoints_3d"], dtype=np.float32
+        )
+        cam_t: Float32[ndarray, "3"] = np.ascontiguousarray(output["pred_cam_t"], dtype=np.float32)
+        kpts_world: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(kpts_cam + cam_t, dtype=np.float32)
+        rr.log(
+            f"{parent_log_path}/pred/kpts3d_{i}",
+            rr.Points3D(
+                positions=kpts_world,
+                keypoint_ids=MHR70_IDS,
+                class_ids=0,
+            ),
+        )
+
+        # Log the full-body mesh in world coordinates so it shows in 3D
+        verts_cam: Float32[ndarray, "n_verts 3"] = np.ascontiguousarray(output["pred_vertices"], dtype=np.float32)
+        verts_world: Float32[ndarray, "n_verts 3"] = np.ascontiguousarray(verts_cam + cam_t, dtype=np.float32)
+        faces_int: Int[ndarray, "n_faces 3"] = np.ascontiguousarray(faces, dtype=np.int32)
+        vertex_normals: Float32[ndarray, "n_verts 3"] = compute_vertex_normals(verts_world, faces_int)
+        rr.log(
+            f"{parent_log_path}/pred/mesh_{i}",
+            rr.Mesh3D(
+                vertex_positions=verts_world,
+                triangle_indices=faces_int,
+                vertex_normals=vertex_normals,
+                albedo_factor=(0.65, 0.74, 0.86, 0.35),
+            ),
+        )
+        print(i)
+
+    print(f"Visualization for {image_path} logged to Rerun.")
+
+
+def create_view() -> rrb.ContainerLike:
+    view_2d = rrb.Vertical(
+        contents=[rrb.Spatial2DView(name="image"), rrb.Spatial2DView(name="mhr")],
+    )
+    view_3d = rrb.Spatial3DView(name="mhr_3d")
+    main_view = rrb.Horizontal(contents=[view_2d, view_3d])
+    view = rrb.Tabs(contents=[main_view], name="sam-3d-body-demo")
+    return view
+
+
+def main(cfg: Sam3DBodyConfig):
+    if cfg.output_folder == "":
+        output_folder = os.path.join("./output", os.path.basename(cfg.image_folder))
+    else:
+        output_folder = cfg.output_folder
+    os.makedirs(output_folder, exist_ok=True)
+    # rerun setup
+    parent_log_path = Path("/world")
+    set_annotation_context()
+    # blueprint
+    view = create_view()
+    blueprint = rrb.Blueprint(view, collapse_panels=True)
+    print(view)
+    rr.send_blueprint(blueprint)
+    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+
+    # Use command-line args or environment variables
+    mhr_path = cfg.mhr_path
+    detector_path = cfg.detector_path
+    segmentor_path = cfg.segmentor_path
+
+    # Initialize sam-3d-body model and other optional modules
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+    load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body(cfg.checkpoint_path, device=device, mhr_path=mhr_path)
+    model: SAM3DBody = load_output[0]
+    model_cfg: CfgNode = load_output[1]
+    human_detector, human_segmentor, fov_estimator = None, None, None
+    if cfg.detector_name:
+        from sam3d_body.api.build_detector import HumanDetector
+
+        human_detector = HumanDetector(name=cfg.detector_name, device=device, path=detector_path)
+    if len(segmentor_path):
+        from sam3d_body.api.build_sam import HumanSegmentor
+
+        human_segmentor = HumanSegmentor(name=cfg.segmentor_name, device=device, path=segmentor_path)
+    if cfg.fov_name:
+        from sam3d_body.api.build_fov_estimator import FOVEstimator
+
+        fov_estimator = FOVEstimator(name=cfg.fov_name, device=device)
+
+    estimator = SAM3DBodyEstimator(
+        sam_3d_body_model=model,
+        model_cfg=model_cfg,
+        human_detector=human_detector,
+        human_segmentor=human_segmentor,
+        fov_estimator=fov_estimator,
+    )
+
+    image_extensions: list[str] = [
+        "*.jpg",
+        "*.jpeg",
+        "*.png",
+        "*.gif",
+        "*.bmp",
+        "*.tiff",
+        "*.webp",
+    ]
+    images_list: list[str] = sorted(
+        [image for ext in image_extensions for image in glob(os.path.join(cfg.image_folder, ext))]
+    )
+
+    for idx, image_path in enumerate(tqdm(images_list)):
+        rr.set_time(timeline="image_sequence", sequence=idx)
+        outputs: list[PosePrediction] = estimator.process_one_image(
+            image_path,
+            bbox_thr=cfg.bbox_thresh,
+            use_mask=cfg.use_mask,
+        )
+
+        if len(outputs) == 0:
+            # Detector/FOV failed on this frame; avoid crashing the visualization step.
+            print(f"[warn] No detections for {image_path}; skipping.")
+            continue
+
+        visualize_sample(outputs, image_path, parent_log_path=parent_log_path, faces=estimator.faces)
+
+        # img = cv2.imread(image_path)
+        # rend_img = visualize_sample_together(img, outputs, estimator.faces)
+        # rr.log("original_image", rr.Image(rend_img.astype(np.uint8), color_model=rr.ColorModel.BGR))
