@@ -16,11 +16,24 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
 from yacs.config import CfgNode
 
-from sam3d_body.api.vis_utils import visualize_sample_together
 from sam3d_body.build_models import load_sam_3d_body
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
 from sam3d_body.models.meta_arch import SAM3DBody
 from sam3d_body.new_sam_3d_body_estimator import PosePrediction, SAM3DBodyEstimator
+
+BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
+    [
+        [255, 99, 71, 255],  # tomato
+        [65, 105, 225, 255],  # royal blue
+        [60, 179, 113, 255],  # medium sea green
+        [255, 215, 0, 255],  # gold
+        [138, 43, 226, 255],  # blue violet
+        [255, 140, 0, 255],  # dark orange
+        [220, 20, 60, 255],  # crimson
+        [70, 130, 180, 255],  # steel blue
+    ],
+    dtype=np.uint8,
+)
 
 
 def compute_vertex_normals(
@@ -64,37 +77,45 @@ def compute_vertex_normals(
     return vn_unit
 
 
-@dataclass
+@dataclass(slots=True)
 class Sam3DBodyConfig:
-    """
-    Configure the demo entrypoint.
-
-    Attributes:
-        mhr_path: Path to the MHR mesh/pose asset file required by the head network.
-        detector_path: Optional local checkpoint for the human detector; empty to use default weights.
-        segmentor_path: Optional local checkpoint for the SAM-based human segmentor; empty to use default weights.
-        image_folder: Directory containing input images to process.
-        output_folder: Directory where rendered visualizations will be saved.
-        checkpoint_path: Core SAM 3D Body model checkpoint (.ckpt).
-        detector_name: Human detector backbone to load (None disables detection and uses full-image box).
-        segmentor_name: Segmentor name used when `segmentor_path` is provided.
-        fov_name: FOV estimator name (None disables FOV estimation and uses default intrinsics).
-        bbox_thresh: Confidence threshold for detector boxes.
-        use_mask: Whether to request mask-conditioned inference (requires `segmentor_path` / SAM).
-    """
+    """Configuration for the standalone demo runner."""
 
     rr_config: RerunTyroConfig
+    """Viewer/runtime options for Rerun (window layout, recording, etc.)."""
+
     mhr_path: Path = Path("checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt")
+    """Path to the MHR mesh/pose asset file required by the head network."""
+
     detector_path: str = ""
+    """Optional local checkpoint for the human detector; empty uses default weights."""
+
     segmentor_path: str = ""
+    """Optional local checkpoint for the SAM-based human segmentor; empty uses default weights."""
+
     image_folder: Path = Path("data/test-input/")
+    """Directory containing input images to process."""
+
     output_folder: Path = Path("data/test-outputs/")
+    """Directory where rendered visualizations will be saved."""
+
     checkpoint_path: Path = Path("checkpoints/sam-3d-body-dinov3/model.ckpt")
+    """Core SAM 3D Body model checkpoint (.ckpt)."""
+
     detector_name: Literal["vitdet"] | None = "vitdet"
+    """Detector backbone to load; ``None`` disables detection and uses full-image box."""
+
     segmentor_name: Literal["sam2"] | None = "sam2"
+    """Segmentor name used when ``segmentor_path`` is provided; ``None`` disables segmentation."""
+
     fov_name: Literal["moge2"] | None = "moge2"
+    """FOV estimator name; ``None`` disables FOV estimation and falls back to default intrinsics."""
+
     bbox_thresh: float = 0.8
+    """Confidence threshold for detector boxes."""
+
     use_mask: bool = False
+    """Whether to request mask-conditioned inference (requires ``segmentor_path`` / SAM)."""
 
 
 def set_annotation_context() -> None:
@@ -104,7 +125,7 @@ def set_annotation_context() -> None:
         rr.AnnotationContext(
             [
                 rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="MHR-70", color=(0, 0, 255)),
+                    info=rr.AnnotationInfo(id=0, label="Person", color=(0, 0, 255)),
                     keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in MHR70_ID2NAME.items()],
                     keypoint_connections=MHR70_LINKS,
                 ),
@@ -130,14 +151,16 @@ def visualize_sample(
     rr.log(str(mesh_root_path), rr.Clear(recursive=True))
 
     for i, output in enumerate(outputs):
-        rr.log(f"{pred_log_path}/bbox_{i}", rr.Boxes2D(array=output["bbox"], array_format=rr.Box2DFormat.XYXY))
+        box_color: UInt8[ndarray, "1 4"] = BOX_PALETTE[i % len(BOX_PALETTE)].reshape(1, 4)
         rr.log(
-            f"{pred_log_path}/lbbox_{i}",
-            rr.Boxes2D(array=output["lhand_bbox"], array_format=rr.Box2DFormat.XYXY),
-        )
-        rr.log(
-            f"{pred_log_path}/rbbox_{i}",
-            rr.Boxes2D(array=output["rhand_bbox"], array_format=rr.Box2DFormat.XYXY),
+            f"{pred_log_path}/bbox_{i}",
+            rr.Boxes2D(
+                array=output["bbox"],
+                array_format=rr.Box2DFormat.XYXY,
+                class_ids=0,
+                colors=box_color,
+                show_labels=True,
+            ),
         )
         rr.log(
             f"{pred_log_path}/uv_{i}",
@@ -145,13 +168,12 @@ def visualize_sample(
                 positions=output["pred_keypoints_2d"],
                 keypoint_ids=MHR70_IDS,
                 class_ids=0,
+                colors=(0, 255, 0),
             ),
         )
 
         # Log 3D keypoints in world coordinates
-        kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(
-            output["pred_keypoints_3d"], dtype=np.float32
-        )
+        kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(output["pred_keypoints_3d"], dtype=np.float32)
         cam_t: Float32[ndarray, "3"] = np.ascontiguousarray(output["pred_cam_t"], dtype=np.float32)
         kpts_world: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(kpts_cam + cam_t, dtype=np.float32)
         rr.log(
@@ -160,6 +182,7 @@ def visualize_sample(
                 positions=kpts_world,
                 keypoint_ids=MHR70_IDS,
                 class_ids=0,
+                colors=(0, 255, 0),
             ),
         )
 
@@ -174,20 +197,25 @@ def visualize_sample(
                 vertex_positions=verts_world,
                 triangle_indices=faces_int,
                 vertex_normals=vertex_normals,
-                albedo_factor=(0.65, 0.74, 0.86, 0.35),
+                albedo_factor=(
+                    float(box_color[0, 0]) / 255.0,
+                    float(box_color[0, 1]) / 255.0,
+                    float(box_color[0, 2]) / 255.0,
+                    0.35,
+                ),
             ),
         )
-        print(i)
-
-    print(f"Visualization for {image_path} logged to Rerun.")
 
 
 def create_view() -> rrb.ContainerLike:
     view_2d = rrb.Vertical(
-        contents=[rrb.Spatial2DView(name="image"), rrb.Spatial2DView(name="mhr")],
+        contents=[
+            rrb.Spatial2DView(name="image", contents=["/world/cam/pinhole/image", "- /world/cam/pinhole/pred"]),
+            rrb.Spatial2DView(name="mhr"),
+        ],
     )
-    view_3d = rrb.Spatial3DView(name="mhr_3d")
-    main_view = rrb.Horizontal(contents=[view_2d, view_3d])
+    view_3d = rrb.Spatial3DView(name="mhr_3d", line_grid=rrb.LineGrid3D(visible=False))
+    main_view = rrb.Horizontal(contents=[view_2d, view_3d], column_shares=[2, 3])
     view = rrb.Tabs(contents=[main_view], name="sam-3d-body-demo")
     return view
 
@@ -204,7 +232,6 @@ def main(cfg: Sam3DBodyConfig):
     # blueprint
     view = create_view()
     blueprint = rrb.Blueprint(view, collapse_panels=True)
-    print(view)
     rr.send_blueprint(blueprint)
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
 
@@ -219,6 +246,7 @@ def main(cfg: Sam3DBodyConfig):
     load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body(cfg.checkpoint_path, device=device, mhr_path=mhr_path)
     model: SAM3DBody = load_output[0]
     model_cfg: CfgNode = load_output[1]
+
     human_detector, human_segmentor, fov_estimator = None, None, None
     if cfg.detector_name:
         from sam3d_body.api.build_detector import HumanDetector
@@ -268,7 +296,3 @@ def main(cfg: Sam3DBodyConfig):
             continue
 
         visualize_sample(outputs, image_path, parent_log_path=parent_log_path, faces=estimator.faces)
-
-        # img = cv2.imread(image_path)
-        # rend_img = visualize_sample_together(img, outputs, estimator.faces)
-        # rr.log("original_image", rr.Image(rend_img.astype(np.uint8), color_model=rr.ColorModel.BGR))
