@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -37,6 +38,17 @@ PROMPT_KEYPOINTS = {  # keypoint_idx: prompt_idx
 KEY_BODY = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 41, 62]  # key body joints for prompting
 KEY_RIGHT_HAND = list(range(21, 42))
 # fmt: on
+
+
+@dataclass
+class BodyPredContainer:
+    """Structured container for main body + optional hand inference outputs."""
+
+    pose_output: dict[str, Any]
+    batch_lhand: dict[str, Any] | None = None
+    batch_rhand: dict[str, Any] | None = None
+    lhand_output: dict[str, Any] | None = None
+    rhand_output: dict[str, Any] | None = None
 
 
 class SAM3DBody(BaseModel):
@@ -1054,10 +1066,10 @@ class SAM3DBody(BaseModel):
 
         if inference_type == "body":
             pose_output = self.forward_step(batch, decoder_type="body")
-            return pose_output
+            return BodyPredContainer(pose_output=pose_output)
         elif inference_type == "hand":
             pose_output = self.forward_step(batch, decoder_type="hand")
-            return pose_output
+            return BodyPredContainer(pose_output=pose_output)
         elif inference_type != "full":
             raise ValueError("Invalid inference type: ", inference_type)
 
@@ -1389,7 +1401,13 @@ class SAM3DBody(BaseModel):
         pred_keypoints_3d_proj[:, :, :2] = pred_keypoints_3d_proj[:, :, :2] / pred_keypoints_3d_proj[:, :, [2]]
         pose_output["mhr"]["pred_keypoints_2d"] = pred_keypoints_3d_proj[:, :, :2]
 
-        return pose_output, batch_lhand, batch_rhand, lhand_output, rhand_output
+        return BodyPredContainer(
+            pose_output=pose_output,
+            batch_lhand=batch_lhand,
+            batch_rhand=batch_rhand,
+            lhand_output=lhand_output,
+            rhand_output=rhand_output,
+        )
 
     def run_keypoint_prompt(self, batch, output, keypoint_prompt):
         image_embeddings = output["image_embeddings"]

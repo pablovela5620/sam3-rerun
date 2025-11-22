@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from jaxtyping import Float, UInt8
 from torchvision.transforms import ToTensor
+from yacs.config import CfgNode
 
 from sam3d_body.data.transforms import (
     Compose,
@@ -17,8 +18,8 @@ from sam3d_body.data.transforms import (
 from sam3d_body.data.utils.io import load_image
 from sam3d_body.data.utils.prepare_batch import NoCollate, prepare_batch
 from sam3d_body.models.meta_arch import SAM3DBody
+from sam3d_body.models.meta_arch.sam3d_body import BodyPredContainer
 from sam3d_body.utils import recursive_to
-from yacs.config import CfgNode
 
 
 class PosePrediction(TypedDict, total=False):
@@ -204,19 +205,16 @@ class SAM3DBodyEstimator:
         else:
             cam_int_tensor = cast(torch.Tensor, batch["cam_int"]).clone()
 
-        outputs = self.model.run_inference(
+        outputs: BodyPredContainer = self.model.run_inference(
             img_array,
             batch,
             inference_type=inference_type,
             transform_hand=self.transform_hand,
             thresh_wrist_angle=self.thresh_wrist_angle,
         )
-        batch_lhand: dict[str, Any] | None = None
-        batch_rhand: dict[str, Any] | None = None
-        if inference_type == "full":
-            pose_output, batch_lhand, batch_rhand, _, _ = outputs
-        else:
-            pose_output = outputs
+        pose_output = outputs.pose_output
+        batch_lhand = outputs.batch_lhand
+        batch_rhand = outputs.batch_rhand
 
         pose_output_dict = cast(dict[str, Any], pose_output)
         out = cast(dict[str, Any], pose_output_dict["mhr"])

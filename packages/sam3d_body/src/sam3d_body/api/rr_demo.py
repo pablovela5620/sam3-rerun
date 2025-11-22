@@ -19,7 +19,7 @@ from yacs.config import CfgNode
 from sam3d_body.build_models import load_sam_3d_body
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
 from sam3d_body.models.meta_arch import SAM3DBody
-from sam3d_body.new_sam_3d_body_estimator import PosePrediction, SAM3DBodyEstimator
+from sam3d_body.new_sam_3d_body_estimator import PosePredictionDict, SAM3DBodyEstimator
 
 BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
     [
@@ -96,9 +96,6 @@ class Sam3DBodyConfig:
     image_folder: Path = Path("data/test-input/")
     """Directory containing input images to process."""
 
-    output_folder: Path = Path("data/test-outputs/")
-    """Directory where rendered visualizations will be saved."""
-
     checkpoint_path: Path = Path("checkpoints/sam-3d-body-dinov3/model.ckpt")
     """Core SAM 3D Body model checkpoint (.ckpt)."""
 
@@ -136,7 +133,7 @@ def set_annotation_context() -> None:
 
 
 def visualize_sample(
-    outputs: list[PosePrediction], image_path: str, parent_log_path: Path, faces: Int[ndarray, "n_faces 3"]
+    outputs: list[PosePredictionDict], image_path: str, parent_log_path: Path, faces: Int[ndarray, "n_faces 3"]
 ) -> None:
     bgr_image: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
     cam_log_path: Path = parent_log_path / "cam"
@@ -221,11 +218,6 @@ def create_view() -> rrb.ContainerLike:
 
 
 def main(cfg: Sam3DBodyConfig):
-    if cfg.output_folder == "":
-        output_folder = os.path.join("./output", os.path.basename(cfg.image_folder))
-    else:
-        output_folder = cfg.output_folder
-    os.makedirs(output_folder, exist_ok=True)
     # rerun setup
     parent_log_path = Path("/world")
     set_annotation_context()
@@ -284,7 +276,7 @@ def main(cfg: Sam3DBodyConfig):
 
     for idx, image_path in enumerate(tqdm(images_list)):
         rr.set_time(timeline="image_sequence", sequence=idx)
-        outputs: list[PosePrediction] = estimator.process_one_image(
+        outputs: list[PosePredictionDict] = estimator.process_one_image(
             image_path,
             bbox_thr=cfg.bbox_thresh,
             use_mask=cfg.use_mask,
