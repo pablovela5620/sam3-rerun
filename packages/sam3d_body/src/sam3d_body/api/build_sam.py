@@ -1,7 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-import torch
 import numpy as np
+import torch
+from pathlib import Path
+from typing import Tuple
 
 
 class HumanSegmentor:
@@ -15,21 +17,63 @@ class HumanSegmentor:
 
         else:
             raise NotImplementedError
-    
+
     def run_sam(self, img, boxes, **kwargs):
         return self.sam_func(self.sam, img, boxes)
-        
+
+
+def _pick_ckpt_and_cfg(path: Path) -> Tuple[Path, str]:
+    """Return the checkpoint file and config name (relative path) for the given location."""
+    path = Path(path)
+
+    # If the user points directly to a .pt file, use it.
+    if path.is_file() and path.suffix == ".pt":
+        ckpt = path
+    else:
+        # Otherwise search common filenames inside the directory.
+        candidates = [
+            path / "sam2.1_hiera_large.pt",
+            path / "sam2.1_hiera_base_plus.pt",
+            path / "sam2.1_hiera_base.pt",
+            path / "sam2.1_hiera_small.pt",
+            path / "sam2.1_hiera_tiny.pt",
+        ]
+        ckpt = next((c for c in candidates if c.exists()), None)
+        if ckpt is None:
+            pt_files = list(path.glob("*.pt"))
+            if pt_files:
+                ckpt = pt_files[0]
+
+    if ckpt is None or not ckpt.exists():
+        raise FileNotFoundError(
+            f"SAM2 checkpoint not found at {path}. "
+            "Pass --segmentor-path to the checkpoint file or a directory containing it."
+        )
+
+    ckpt_name = ckpt.name
+    if "hiera_large" in ckpt_name:
+        cfg_name = "sam2.1_hiera_l.yaml"
+    elif "hiera_base_plus" in ckpt_name or "hiera_b+" in ckpt_name:
+        cfg_name = "sam2.1_hiera_b+.yaml"
+    elif "hiera_small" in ckpt_name:
+        cfg_name = "sam2.1_hiera_s.yaml"
+    elif "hiera_tiny" in ckpt_name:
+        cfg_name = "sam2.1_hiera_t.yaml"
+    else:
+        # Default to large if we cannot infer; it exists in the package.
+        cfg_name = "sam2.1_hiera_l.yaml"
+
+    cfg_relpath = f"configs/sam2.1/{cfg_name}"
+    return ckpt, cfg_relpath
+
 
 def load_sam2(device, path):
-    checkpoint = f"{path}/checkpoints/sam2.1_hiera_large.pt"
-    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    ckpt_path, cfg_relpath = _pick_ckpt_and_cfg(Path(path))
 
-    import sys
-    sys.path.append(path)
     from sam2.build_sam import build_sam2
     from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-    predictor = SAM2ImagePredictor(build_sam2(model_cfg, checkpoint, device=device))
+    predictor = SAM2ImagePredictor(build_sam2(cfg_relpath, str(ckpt_path), device=device))
     predictor.model.eval()
 
     return predictor
@@ -60,6 +104,5 @@ def run_sam2(sam_predictor, img, boxes):
             # cv2.imwrite(os.path.join(save_dir, f"{os.path.basename(image_path)[:-4]}_mask_{i}.jpg"), (mask_1 * 255).astype(np.uint8))
         all_masks = np.stack(all_masks)
         all_scores = np.stack(all_scores)
-    
+
     return all_masks, all_scores
-        

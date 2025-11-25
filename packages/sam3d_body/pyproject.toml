@@ -38,12 +38,16 @@ preview = ["pixi-build"]
 
 [tool.pixi.pypi-options]
 no-build-isolation = ["detectron2", "moge"]
+[tool.pixi.pypi-options.dependency-overrides]
+# Allow iopath >=0.1.10 even though detectron2 pins <0.1.10, so it can satisfy sam-2.
+iopath = ">=0.1.10"
 [tool.pixi.pypi-dependencies]
 sam3d_body = { path = ".", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git" }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", branch = "ingest-all" }
 detectron2 = { git = "https://github.com/facebookresearch/detectron2.git", rev = "main" }
+sam-2 = { git = "https://github.com/facebookresearch/sam2.git", rev = "main" }
 timm = ">=0.9"
 
 [tool.pixi.tasks]

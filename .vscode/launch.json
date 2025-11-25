@@ -11,7 +11,9 @@
             "program": "tool/demo.py",
             "cwd": "${workspaceFolder}/packages/sam3d_body",
             "console": "integratedTerminal",
-            "args": [],
+            "args": [
+                "--rr-config.connect"
+            ],
             "env": {
                 "PIXI_ENVIRONMENT_NAME": "dev"
             }

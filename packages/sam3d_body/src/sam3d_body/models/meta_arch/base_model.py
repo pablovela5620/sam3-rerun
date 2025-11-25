@@ -4,7 +4,6 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Dict, Optional
 
 import torch
 from yacs.config import CfgNode
@@ -14,7 +13,7 @@ from .base_lightning_module import BaseLightningModule
 
 
 class BaseModel(BaseLightningModule):
-    def __init__(self, cfg: Optional[CfgNode], **kwargs):
+    def __init__(self, cfg: CfgNode | None, **kwargs):
         super().__init__()
 
         # Save hyperparameters
@@ -65,7 +64,7 @@ class BaseModel(BaseLightningModule):
 
         return batch_inputs
 
-    def _initialize_batch(self, batch: Dict) -> None:
+    def _initialize_batch(self, batch: dict) -> None:
         # Check whether the input batch is with format
         # [batch_size, num_person, ...]
         if batch["img"].dim() == 5:
@@ -98,7 +97,7 @@ class BaseModel(BaseLightningModule):
             x = x[self._person_valid]
         return x
 
-    def _full_to_crop(self, batch: Dict, pred_keypoints_2d: torch.Tensor) -> torch.Tensor:
+    def _full_to_crop(self, batch: dict, pred_keypoints_2d: torch.Tensor) -> torch.Tensor:
         """Convert full-image keypoints coordinates to crop and normalize to [-0.5. 0.5]"""
         pred_keypoints_2d_cropped = torch.cat(
             [pred_keypoints_2d, torch.ones_like(pred_keypoints_2d[:, :, [-1]])], dim=-1
@@ -111,14 +110,13 @@ class BaseModel(BaseLightningModule):
         return pred_keypoints_2d_cropped
 
     def _cam_full_to_crop(
-        self, batch: Dict, pred_cam_t: torch.Tensor, focal_length: torch.Tensor = None
+        self, batch: dict, pred_cam_t: torch.Tensor, focal_length: torch.Tensor = None
     ) -> torch.Tensor:
         """Revert the camera translation from full to crop image space"""
         num_person = batch["img"].shape[1]
         cam_int = self._flatten_person(batch["cam_int"].unsqueeze(1).expand(-1, num_person, -1, -1).contiguous())
         bbox_center = self._flatten_person(batch["bbox_center"])
         bbox_size = self._flatten_person(batch["bbox_scale"])[:, 0]
-        img_size = self._flatten_person(batch["ori_img_size"])
         input_size = self._flatten_person(batch["img_size"])[:, 0]
 
         tx, ty, tz = pred_cam_t[:, 0], pred_cam_t[:, 1], pred_cam_t[:, 2]

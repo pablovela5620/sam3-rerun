@@ -19,7 +19,7 @@ from yacs.config import CfgNode
 from sam3d_body.build_models import load_sam_3d_body
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
 from sam3d_body.models.meta_arch import SAM3DBody
-from sam3d_body.new_sam_3d_body_estimator import PosePredictionDict, SAM3DBodyEstimator
+from sam3d_body.sam_3d_body_estimator import PosePredictionDict, SAM3DBodyEstimator
 
 BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
     [
@@ -34,6 +34,9 @@ BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
     ],
     dtype=np.uint8,
 )
+
+# Use a separate id range for segmentation classes to avoid clobbering the person class (id=0).
+SEG_CLASS_OFFSET = 1000  # background = 1000, persons start at 1001
 
 
 def compute_vertex_normals(
@@ -90,7 +93,7 @@ class Sam3DBodyConfig:
     detector_path: str = ""
     """Optional local checkpoint for the human detector; empty uses default weights."""
 
-    segmentor_path: str = ""
+    segmentor_path: Path = Path("checkpoints/sam2.1")
     """Optional local checkpoint for the SAM-based human segmentor; empty uses default weights."""
 
     image_folder: Path = Path("data/test-input/")
@@ -111,23 +114,38 @@ class Sam3DBodyConfig:
     bbox_thresh: float = 0.8
     """Confidence threshold for detector boxes."""
 
-    use_mask: bool = False
+    use_mask: bool = True
     """Whether to request mask-conditioned inference (requires ``segmentor_path`` / SAM)."""
+
+    max_frames: int | None = None
+    """Optional limit on the number of images to process; ``None`` processes all images."""
 
 
 def set_annotation_context() -> None:
-    """Register MHR-70 semantic metadata so subsequent logs show names/edges."""
+    """Register MHR-70 semantic metadata so subsequent logs show names/edges and mask colors."""
+    # Base person class (for keypoints / boxes) uses id=0 (original), segmentation uses 1000+ to avoid clashes.
+    person_class = rr.ClassDescription(
+        info=rr.AnnotationInfo(id=0, label="Person", color=(0, 0, 255)),
+        keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in MHR70_ID2NAME.items()],
+        keypoint_connections=MHR70_LINKS,
+    )
+
+    # Segmentation classes: id=SEG_CLASS_OFFSET background, ids SEG_CLASS_OFFSET+1..n for each instance color.
+    seg_classes: list[rr.ClassDescription] = [
+        rr.ClassDescription(info=rr.AnnotationInfo(id=SEG_CLASS_OFFSET, label="Background", color=(64, 64, 64))),
+    ]
+    for idx, color in enumerate(BOX_PALETTE[:, :3].tolist(), start=1):
+        seg_classes.append(
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(
+                    id=SEG_CLASS_OFFSET + idx, label=f"Person-{idx}", color=tuple(int(c) for c in color)
+                ),
+            )
+        )
+
     rr.log(
         "/",
-        rr.AnnotationContext(
-            [
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="Person", color=(0, 0, 255)),
-                    keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in MHR70_ID2NAME.items()],
-                    keypoint_connections=MHR70_LINKS,
-                ),
-            ]
-        ),
+        rr.AnnotationContext([person_class, *seg_classes]),
         static=True,
     )
 
@@ -143,6 +161,11 @@ def visualize_sample(
     # clear the previous pred logs
     rr.log(f"{pred_log_path}", rr.Clear(recursive=True))
     rr.log(f"{image_log_path}", rr.Image(bgr_image, color_model=rr.ColorModel.BGR))
+
+    # Build per-pixel maps (SEG_CLASS_OFFSET = background). Also build RGBA overlay with transparent background.
+    h, w = bgr_image.shape[:2]
+    seg_map: Int[ndarray, "h w"] = np.full((h, w), SEG_CLASS_OFFSET, dtype=np.uint16)
+    seg_overlay: UInt8[ndarray, "h w 4"] = np.zeros((h, w, 4), dtype=np.uint8)
 
     mesh_root_path: Path = parent_log_path / "pred"
     rr.log(str(mesh_root_path), rr.Clear(recursive=True))
@@ -168,6 +191,22 @@ def visualize_sample(
                 colors=(0, 255, 0),
             ),
         )
+
+        # Accumulate segmentation masks (if present) into a single segmentation image.
+        mask = output.get("mask")
+        if mask is not None:
+            mask_arr: ndarray = np.asarray(mask).squeeze()
+            if mask_arr.shape != seg_map.shape:
+                mask_arr = cv2.resize(
+                    mask_arr.astype(np.uint8), (seg_map.shape[1], seg_map.shape[0]), interpolation=cv2.INTER_NEAREST
+                )
+            mask_bool = mask_arr.astype(bool)
+            seg_id = SEG_CLASS_OFFSET + i + 1  # keep person class (0) separate from seg classes
+            seg_map = np.where(mask_bool, np.uint16(seg_id), seg_map)
+
+            # Color overlay for this instance, background stays transparent.
+            color = BOX_PALETTE[i % len(BOX_PALETTE), :3]
+            seg_overlay[mask_bool] = np.array([color[0], color[1], color[2], 120], dtype=np.uint8)
 
         # Log 3D keypoints in world coordinates
         kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(output["pred_keypoints_3d"], dtype=np.float32)
@@ -203,15 +242,36 @@ def visualize_sample(
             ),
         )
 
+    # Log segmentation ids (full map) and an RGBA overlay with transparent background.
+    if np.any(seg_map != SEG_CLASS_OFFSET):
+        rr.log(f"{pred_log_path}/segmentation_ids", rr.SegmentationImage(seg_map))
+        rr.log(f"{pred_log_path}/segmentation_overlay", rr.Image(seg_overlay, color_model=rr.ColorModel.RGBA))
+
 
 def create_view() -> rrb.ContainerLike:
     view_2d = rrb.Vertical(
         contents=[
-            rrb.Spatial2DView(name="image", contents=["/world/cam/pinhole/image", "- /world/cam/pinhole/pred"]),
-            rrb.Spatial2DView(name="mhr"),
+            # Top: people-only overlay on the RGB image.
+            rrb.Spatial2DView(
+                name="image",
+                contents=[
+                    "/world/cam/pinhole/image",
+                    "/world/cam/pinhole/pred/segmentation_overlay",
+                ],
+            ),
+            # Bottom: 2D boxes + keypoints; segmentation hidden.
+            rrb.Spatial2DView(
+                name="mhr",
+                contents=[
+                    "/world/cam/pinhole/image",
+                    "/world/cam/pinhole/pred/**",
+                    "- /world/cam/pinhole/pred/segmentation_overlay/**",
+                    "- /world/cam/pinhole/pred/segmentation_ids/**",
+                ],
+            ),
         ],
     )
-    view_3d = rrb.Spatial3DView(name="mhr_3d", line_grid=rrb.LineGrid3D(visible=False))
+    view_3d = rrb.Spatial3DView(name="mhr_3d", contents=["/world/pred/**"], line_grid=rrb.LineGrid3D(visible=False))
     main_view = rrb.Horizontal(contents=[view_2d, view_3d], column_shares=[2, 3])
     view = rrb.Tabs(contents=[main_view], name="sam-3d-body-demo")
     return view
@@ -244,10 +304,10 @@ def main(cfg: Sam3DBodyConfig):
         from sam3d_body.api.build_detector import HumanDetector
 
         human_detector = HumanDetector(name=cfg.detector_name, device=device, path=detector_path)
-    if len(segmentor_path):
+    if segmentor_path:
         from sam3d_body.api.build_sam import HumanSegmentor
 
-        human_segmentor = HumanSegmentor(name=cfg.segmentor_name, device=device, path=segmentor_path)
+        human_segmentor = HumanSegmentor(name=cfg.segmentor_name, device=device, path=str(segmentor_path))
     if cfg.fov_name:
         from sam3d_body.api.build_fov_estimator import FOVEstimator
 
@@ -274,10 +334,14 @@ def main(cfg: Sam3DBodyConfig):
         [image for ext in image_extensions for image in glob(os.path.join(cfg.image_folder, ext))]
     )
 
-    for idx, image_path in enumerate(tqdm(images_list)):
+    for idx, image_path in enumerate(
+        tqdm(images_list[: cfg.max_frames] if cfg.max_frames is not None else images_list)
+    ):
         rr.set_time(timeline="image_sequence", sequence=idx)
+        bgr_hw3: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
+        rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
         outputs: list[PosePredictionDict] = estimator.process_one_image(
-            image_path,
+            rgb_hw3,
             bbox_thr=cfg.bbox_thresh,
             use_mask=cfg.use_mask,
         )
