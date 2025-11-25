@@ -1,30 +1,51 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+from collections.abc import Callable
+from typing import Any, TypedDict, cast
+
 import numpy as np
 import torch
+from jaxtyping import Float, UInt8
+from numpy import ndarray
+from torch import Tensor
 from torch.utils.data import default_collate
 
 
+class PreparedBatch(TypedDict, total=False):
+    img: Float[Tensor, "B N 3 H W"]
+    img_size: Float[Tensor, "B N 2"]
+    ori_img_size: Float[Tensor, "B N 2"]
+    bbox_center: Float[Tensor, "B N 2"]
+    bbox_scale: Float[Tensor, "B N 2"]
+    bbox: Float[Tensor, "B N 4"]
+    affine_trans: Float[Tensor, "B N 2 3"]
+    mask: Float[Tensor, "B N 1 H W"]
+    mask_score: Float[Tensor, "B N"]
+    cam_int: Float[Tensor, "B 3 3"]
+    person_valid: Float[Tensor, "B N"]
+    img_ori: list["NoCollate"]
+
+
 class NoCollate:
-    def __init__(self, data):
-        self.data = data
+    def __init__(self, data: Any) -> None:
+        self.data: Any = data
 
 
 def prepare_batch(
-    img,
-    transform,
-    boxes,
-    masks=None,
-    masks_score=None,
-    cam_int=None,
-):
+    img: UInt8[ndarray, "h w 3"],
+    transform: Callable[[dict[str, Any]], dict[str, Any]],
+    boxes: Float[ndarray, "n 4"],
+    masks: Float[ndarray, "n h w"] | None = None,
+    masks_score: Float[ndarray, "n"] | None = None,
+    cam_int: Float[Tensor, "B 3 3"] | None = None,
+) -> PreparedBatch:
     """A helper function to prepare data batch for SAM 3D Body model inference."""
     height, width = img.shape[:2]
 
     # construct batch data samples
-    data_list = []
+    data_list: list[dict[str, Any]] = []
     for idx in range(boxes.shape[0]):
-        data_info = dict(img=img)
+        data_info: dict[str, Any] = dict(img=img)
         data_info["bbox"] = boxes[idx]  # shape (4,)
         data_info["bbox_format"] = "xyxy"
 
@@ -75,4 +96,4 @@ def prepare_batch(
         ).to(batch["img"])
 
     batch["img_ori"] = [NoCollate(img)]
-    return batch
+    return cast(PreparedBatch, batch)

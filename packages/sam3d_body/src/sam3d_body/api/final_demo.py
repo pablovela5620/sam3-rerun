@@ -164,7 +164,7 @@ def visualize_sample(
 
     # Build per-pixel maps (SEG_CLASS_OFFSET = background). Also build RGBA overlay with transparent background.
     h, w = bgr_image.shape[:2]
-    seg_map: Int[ndarray, "h w"] = np.full((h, w), SEG_CLASS_OFFSET, dtype=np.uint16)
+    seg_map: Int[ndarray, "h w"] = np.full((h, w), SEG_CLASS_OFFSET, dtype=np.int32)
     seg_overlay: UInt8[ndarray, "h w 4"] = np.zeros((h, w, 4), dtype=np.uint8)
 
     mesh_root_path: Path = parent_log_path / "pred"
