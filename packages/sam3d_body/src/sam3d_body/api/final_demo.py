@@ -334,9 +334,7 @@ def main(cfg: Sam3DBodyConfig):
         [image for ext in image_extensions for image in glob(os.path.join(cfg.image_folder, ext))]
     )
 
-    for idx, image_path in enumerate(
-        tqdm(images_list[: cfg.max_frames] if cfg.max_frames is not None else images_list)
-    ):
+    for idx, image_path in enumerate(tqdm(images_list)):
         rr.set_time(timeline="image_sequence", sequence=idx)
         bgr_hw3: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
         rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)

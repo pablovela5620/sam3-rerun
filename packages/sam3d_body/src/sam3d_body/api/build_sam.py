@@ -1,9 +1,9 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
+from pathlib import Path
+
 import numpy as np
 import torch
-from pathlib import Path
-from typing import Tuple
 
 
 class HumanSegmentor:
@@ -22,7 +22,7 @@ class HumanSegmentor:
         return self.sam_func(self.sam, img, boxes)
 
 
-def _pick_ckpt_and_cfg(path: Path) -> Tuple[Path, str]:
+def _pick_ckpt_and_cfg(path: Path) -> tuple[Path, str]:
     """Return the checkpoint file and config name (relative path) for the given location."""
     path = Path(path)
 
