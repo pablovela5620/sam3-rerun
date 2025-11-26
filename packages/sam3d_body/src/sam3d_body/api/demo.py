@@ -126,7 +126,9 @@ class SAM3DBodyE2E:
             sam_3d_body_model=model,
         )
 
-    def predict_single_image(self, rgb_hw3: UInt8[ndarray, "h w 3"]) -> list[FinalPosePrediction]:
+    def predict_single_image(
+        self, rgb_hw3: UInt8[ndarray, "h w 3"]
+    ) -> tuple[list[FinalPosePrediction], RelativeDepthPrediction]:
         """Estimate 3D poses for a single frame.
 
         Pipeline:
@@ -153,7 +155,7 @@ class SAM3DBodyE2E:
             masks_score=sam3_results.scores,
             K_33=K_33,
         )
-        return outputs
+        return outputs, relative_pred
 
 
 @dataclass(slots=True)
@@ -218,15 +220,21 @@ def main(cfg: Sam3DBodyDemoConfig):
         bgr_hw3: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
         rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
-        outputs: list[FinalPosePrediction] = sam3D_body_e2e.predict_single_image(rgb_hw3)
-        if len(outputs) == 0:
+        outputs: tuple[list[FinalPosePrediction], RelativeDepthPrediction] = sam3D_body_e2e.predict_single_image(
+            rgb_hw3
+        )
+        pred_list: list[FinalPosePrediction] = outputs[0]
+        relative_pred: RelativeDepthPrediction = outputs[1]
+
+        if len(pred_list) == 0:
             # Detector/FOV failed on this frame; avoid crashing the visualization step.
             print(f"[warn] No detections for {image_path}; skipping.")
             continue
 
         visualize_sample(
-            pred_list=outputs,
+            pred_list=pred_list,
             rgb_hw3=rgb_hw3,
             parent_log_path=parent_log_path,
             faces=sam3D_body_e2e.sam3d_body_estimator.faces,
+            relative_depth_pred=relative_pred,
         )

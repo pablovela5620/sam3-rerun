@@ -2,11 +2,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Int, UInt8
+from monopriors.depth_utils import depth_edges_mask
+from monopriors.relative_depth_models import RelativeDepthPrediction
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.rerun_log_utils import log_pinhole
 
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
@@ -28,6 +32,8 @@ BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
 
 # Use a separate id range for segmentation classes to avoid clobbering the person class (id=0).
 SEG_CLASS_OFFSET = 1000  # background = 1000, persons start at 1001
+MAX_POINT_CLOUD_POINTS = 50_000
+MIN_DEPTH_CONFIDENCE = 0.5
 
 
 def filter_out_of_bounds(
@@ -136,6 +142,7 @@ def visualize_sample(
     rgb_hw3: UInt8[ndarray, "h w 3"],
     parent_log_path: Path,
     faces: Int[ndarray, "n_faces 3"],
+    relative_depth_pred: RelativeDepthPrediction | None = None,
 ) -> None:
     h: int = rgb_hw3.shape[0]
     w: int = rgb_hw3.shape[1]
@@ -169,6 +176,7 @@ def visualize_sample(
     # Build per-pixel maps (SEG_CLASS_OFFSET = background). Also build RGBA overlay with transparent background.
     seg_map: Int[ndarray, "h w"] = np.full((h, w), SEG_CLASS_OFFSET, dtype=np.int32)
     seg_overlay: UInt8[ndarray, "h w 4"] = np.zeros((h, w, 4), dtype=np.uint8)
+    human_mask: Bool[ndarray, "h w"] = np.zeros((h, w), dtype=bool)
 
     mesh_root_path: Path = parent_log_path / "pred"
     rr.log(str(mesh_root_path), rr.Clear(recursive=True))
@@ -213,6 +221,7 @@ def visualize_sample(
                     mask_arr.astype(np.uint8), (seg_map.shape[1], seg_map.shape[0]), interpolation=cv2.INTER_NEAREST
                 )
             mask_bool = mask_arr.astype(bool)
+            human_mask = np.logical_or(human_mask, mask_bool)
             seg_id = SEG_CLASS_OFFSET + i + 1  # keep person class (0) separate from seg classes
             seg_map = np.where(mask_bool, np.uint16(seg_id), seg_map)
 
@@ -257,6 +266,70 @@ def visualize_sample(
     if np.any(seg_map != SEG_CLASS_OFFSET):
         rr.log(f"{pred_log_path}/segmentation_ids", rr.SegmentationImage(seg_map))
         rr.log(f"{pred_log_path}/segmentation_overlay", rr.Image(seg_overlay, color_model=rr.ColorModel.RGBA))
+
+    # Optionally log depth and a background-only point cloud (for 3D view only).
+    if relative_depth_pred is not None:
+        depth_hw: Float32[ndarray, "h w"] = np.asarray(relative_depth_pred.depth, dtype=np.float32)
+        conf_hw: Float32[ndarray, "h w"] = np.asarray(relative_depth_pred.confidence, dtype=np.float32)
+        if depth_hw.shape != (h, w):
+            depth_hw = cv2.resize(depth_hw, (w, h), interpolation=cv2.INTER_NEAREST)
+        if conf_hw.shape != (h, w):
+            conf_hw = cv2.resize(conf_hw, (w, h), interpolation=cv2.INTER_NEAREST)
+        depth_hw = np.nan_to_num(depth_hw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Remove flying pixels along depth discontinuities.
+        edges_mask: Bool[ndarray, "h w"] = depth_edges_mask(depth_hw, threshold=0.01)
+        depth_hw = depth_hw * np.logical_not(edges_mask)
+
+        # Remove low-confidence pixels.
+        conf_mask: Bool[ndarray, "h w"] = conf_hw >= MIN_DEPTH_CONFIDENCE
+        depth_hw = depth_hw * conf_mask
+
+        background_mask: Bool[ndarray, "h w"] = np.logical_not(human_mask)
+        depth_bg: Float32[ndarray, "h w"] = depth_hw * background_mask
+
+        # Log depth image (not referenced by the 2D blueprint).
+        # rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(depth_bg, meter=1.0))
+
+        fx: float = float(relative_depth_pred.K_33[0, 0])
+        fy: float = float(relative_depth_pred.K_33[1, 1])
+        cx: float = float(relative_depth_pred.K_33[0, 2])
+        cy: float = float(relative_depth_pred.K_33[1, 2])
+
+        u: Float32[ndarray, "w"] = np.arange(w, dtype=np.float32)
+        v: Float32[ndarray, "h"] = np.arange(h, dtype=np.float32)
+        uu: Float32[ndarray, "h w"]
+        vv: Float32[ndarray, "h w"]
+        uu, vv = np.meshgrid(u, v)
+
+        z_cam: Float32[ndarray, "h w"] = depth_bg
+        valid: Bool[ndarray, "h w"] = np.logical_and(z_cam > 0.0, np.isfinite(z_cam))
+        if np.any(valid):
+            x_cam: Float32[ndarray, "h w"] = (uu - cx) * z_cam / fx
+            y_cam: Float32[ndarray, "h w"] = (vv - cy) * z_cam / fy
+            points_cam: Float32[ndarray, "h w 3"] = np.stack([x_cam, y_cam, z_cam], axis=-1)
+
+            points_flat: Float32[ndarray, "n_valid 3"] = points_cam[valid]
+            colors_flat: UInt8[ndarray, "n_valid 3"] = rgb_hw3[valid]
+
+            if points_flat.shape[0] > MAX_POINT_CLOUD_POINTS:
+                voxel_size: float = estimate_voxel_size(
+                    points_flat, target_points=MAX_POINT_CLOUD_POINTS, tolerance=0.25
+                )
+                pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(points_flat)
+                pcd.colors = o3d.utility.Vector3dVector(colors_flat.astype(np.float32) / 255.0)
+                pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
+                points_flat = np.asarray(pcd_ds.points, dtype=np.float32)
+                colors_flat = (np.asarray(pcd_ds.colors, dtype=np.float32) * 255.0).astype(np.uint8)
+
+            rr.log(
+                f"{parent_log_path}/depth_point_cloud",
+                rr.Points3D(
+                    positions=points_flat,
+                    colors=colors_flat,
+                ),
+            )
 
 
 def create_view() -> rrb.ContainerLike:

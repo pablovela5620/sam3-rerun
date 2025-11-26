@@ -14,6 +14,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from gradio_rerun import Rerun
 from jaxtyping import Int, UInt8
+from monopriors.relative_depth_models import RelativeDepthPrediction
 from numpy import ndarray
 
 from sam3d_body.api.demo import SAM3Config, SAM3DBodyE2E, SAM3DBodyE2EConfig, create_view, set_annotation_context
@@ -39,7 +40,9 @@ def sam3d_prediction_fn(rgb_hw3: UInt8[ndarray, "h w 3"], pending_cleanup) -> tu
     parent_log_path = Path("/world")
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
 
-    pred_list: list[FinalPosePrediction] = MODEL_E2E.predict_single_image(rgb_hw3=rgb_hw3)
+    outputs: tuple[list[FinalPosePrediction], RelativeDepthPrediction] = MODEL_E2E.predict_single_image(rgb_hw3=rgb_hw3)
+    pred_list: list[FinalPosePrediction] = outputs[0]
+    relative_pred: RelativeDepthPrediction = outputs[1]
     rr.set_time(timeline="image_sequence", sequence=0)
     visualize_sample(
         pred_list=pred_list,
