@@ -27,7 +27,7 @@ mesh_faces: Int[ndarray, "n_faces=36874 3"] = MODEL_E2E.sam3d_body_estimator.fac
 
 
 @rr.thread_local_stream("sam3d_body_gradio_ui")
-def sam3d_prediction_fn(rgb_hw3: UInt8[ndarray, "h w 3"], pending_cleanup) -> tuple[str, str]:
+def sam3d_prediction_fn(rgb_hw3: UInt8[ndarray, "h w 3"], pending_cleanup, log_relative_depth: bool) -> tuple[str, str]:
     # We eventually want to clean up the RRD file after it's sent to the viewer, so tracking
     # any pending files to be cleaned up when the state is deleted.
     temp = tempfile.NamedTemporaryFile(prefix="cube_", suffix=".rrd", delete=False)
@@ -49,6 +49,7 @@ def sam3d_prediction_fn(rgb_hw3: UInt8[ndarray, "h w 3"], pending_cleanup) -> tu
         rgb_hw3=rgb_hw3,
         parent_log_path=parent_log_path,
         faces=mesh_faces,
+        relative_depth_pred=relative_pred if log_relative_depth else None,
     )
 
     return temp.name, "Done"
@@ -65,6 +66,7 @@ def main():
         with gr.Row():
             with gr.Column(scale=1):
                 img = gr.Image(interactive=True, label="Image", type="numpy", image_mode="RGB")
+                log_relative_depth_checkbox = gr.Checkbox(label="Log relative depth", value=False)
                 create_rrd = gr.Button("Create RRD")
                 json_output = gr.Text()
             with gr.Column(scale=5):
@@ -79,7 +81,7 @@ def main():
                 )
         create_rrd.click(
             sam3d_prediction_fn,
-            inputs=[img, pending_cleanup],
+            inputs=[img, pending_cleanup, log_relative_depth_checkbox],
             outputs=[viewer, json_output],
         )
     return demo
