@@ -4,8 +4,10 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float32, Int, UInt8
+from jaxtyping import Bool, Float32, Int, UInt8
 from numpy import ndarray
+from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.rerun_log_utils import log_pinhole
 
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
@@ -26,6 +28,37 @@ BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
 
 # Use a separate id range for segmentation classes to avoid clobbering the person class (id=0).
 SEG_CLASS_OFFSET = 1000  # background = 1000, persons start at 1001
+
+
+def filter_out_of_bounds(
+    uv: Float32[ndarray, "n_points 2"],
+    h: int,
+    w: int,
+    xyz_cam: Float32[ndarray, "n_points 3"] | None = None,
+) -> Float32[ndarray, "n_points 2"]:
+    """Return a copy of ``uv`` with off-screen (and optional behind-camera) points masked.
+
+    Args:
+        uv: Pixel coordinates ``[N, 2]`` in (u, v) order.
+        h: Image height in pixels.
+        w: Image width in pixels.
+        xyz_cam: Optional camera-frame coordinates ``[N, 3]`` to mask points with negative ``z``.
+
+    Returns:
+        Copy of ``uv`` where out-of-bounds rows are set to ``NaN`` so Rerun hides them.
+    """
+
+    uv_filtered: Float32[ndarray, "n_points 2"] = np.asarray(uv, dtype=np.float32).copy()
+
+    out_of_bounds: Bool[ndarray, "n_points"] = np.logical_or(uv_filtered[:, 0] >= float(w), uv_filtered[:, 0] < 0.0)
+    out_of_bounds = np.logical_or(out_of_bounds, uv_filtered[:, 1] >= float(h))
+    out_of_bounds = np.logical_or(out_of_bounds, uv_filtered[:, 1] < 0.0)
+
+    if xyz_cam is not None:
+        out_of_bounds = np.logical_or(out_of_bounds, xyz_cam[:, 2] < 0.0)
+
+    uv_filtered[out_of_bounds, :] = np.nan
+    return uv_filtered
 
 
 def compute_vertex_normals(
@@ -104,16 +137,36 @@ def visualize_sample(
     parent_log_path: Path,
     faces: Int[ndarray, "n_faces 3"],
 ) -> None:
+    h: int = rgb_hw3.shape[0]
+    w: int = rgb_hw3.shape[1]
     cam_log_path: Path = parent_log_path / "cam"
     pinhole_log_path: Path = cam_log_path / "pinhole"
     image_log_path: Path = pinhole_log_path / "image"
     pred_log_path: Path = pinhole_log_path / "pred"
+    # log the pinhole camera parameters (assume fx=fy and center at image center)
+    focal_length: float = float(pred_list[0].focal_length)
+    intri: Intrinsics = Intrinsics(
+        camera_conventions="RDF",
+        fl_x=focal_length,
+        fl_y=focal_length,
+        cx=float(w) / 2.0,
+        cy=float(h) / 2.0,
+        height=h,
+        width=w,
+    )
+    world_T_cam: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
+    extri: Extrinsics = Extrinsics(
+        world_R_cam=world_T_cam[:3, :3],
+        world_t_cam=world_T_cam[:3, 3],
+    )
+
+    pinhole_params: PinholeParameters = PinholeParameters(intrinsics=intri, extrinsics=extri, name="pinhole")
+    log_pinhole(camera=pinhole_params, cam_log_path=cam_log_path)
     # clear the previous pred logs
     rr.log(f"{pred_log_path}", rr.Clear(recursive=True))
     rr.log(f"{image_log_path}", rr.Image(rgb_hw3, color_model=rr.ColorModel.RGB).compress(jpeg_quality=90))
 
     # Build per-pixel maps (SEG_CLASS_OFFSET = background). Also build RGBA overlay with transparent background.
-    h, w = rgb_hw3.shape[:2]
     seg_map: Int[ndarray, "h w"] = np.full((h, w), SEG_CLASS_OFFSET, dtype=np.int32)
     seg_overlay: UInt8[ndarray, "h w 4"] = np.zeros((h, w, 4), dtype=np.uint8)
 
@@ -132,10 +185,19 @@ def visualize_sample(
                 show_labels=True,
             ),
         )
+
+        kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(output.pred_keypoints_3d, dtype=np.float32)
+        kpts_uv: Float32[ndarray, "n_kpts 2"] = np.ascontiguousarray(output.pred_keypoints_2d, dtype=np.float32)
+        kpts_uv_in_bounds: Float32[ndarray, "n_kpts 2"] = filter_out_of_bounds(
+            uv=kpts_uv,
+            h=h,
+            w=w,
+            xyz_cam=None,  # Depth sign from the model can be negative; only cull by image bounds.
+        )
         rr.log(
             f"{pred_log_path}/uv_{i}",
             rr.Points2D(
-                positions=output.pred_keypoints_2d,
+                positions=kpts_uv_in_bounds,
                 keypoint_ids=MHR70_IDS,
                 class_ids=0,
                 colors=(0, 255, 0),
@@ -159,7 +221,6 @@ def visualize_sample(
             seg_overlay[mask_bool] = np.array([color[0], color[1], color[2], 120], dtype=np.uint8)
 
         # Log 3D keypoints in world coordinates
-        kpts_cam: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(output.pred_keypoints_3d, dtype=np.float32)
         cam_t: Float32[ndarray, "3"] = np.ascontiguousarray(output.pred_cam_t, dtype=np.float32)
         kpts_world: Float32[ndarray, "n_kpts 3"] = np.ascontiguousarray(kpts_cam + cam_t, dtype=np.float32)
         rr.log(
@@ -204,6 +265,7 @@ def create_view() -> rrb.ContainerLike:
             # Top: people-only overlay on the RGB image.
             rrb.Spatial2DView(
                 name="image",
+                origin="/world/cam/pinhole",
                 contents=[
                     "/world/cam/pinhole/image",
                     "/world/cam/pinhole/pred/segmentation_overlay",
@@ -212,6 +274,7 @@ def create_view() -> rrb.ContainerLike:
             # Bottom: 2D boxes + keypoints; segmentation hidden.
             rrb.Spatial2DView(
                 name="mhr",
+                origin="/world/cam/pinhole",
                 contents=[
                     "/world/cam/pinhole/image",
                     "/world/cam/pinhole/pred/**",
@@ -221,7 +284,7 @@ def create_view() -> rrb.ContainerLike:
             ),
         ],
     )
-    view_3d = rrb.Spatial3DView(name="mhr_3d", contents=["/world/pred/**"], line_grid=rrb.LineGrid3D(visible=False))
+    view_3d = rrb.Spatial3DView(name="mhr_3d", line_grid=rrb.LineGrid3D(visible=False))
     main_view = rrb.Horizontal(contents=[view_2d, view_3d], column_shares=[2, 3])
     view = rrb.Tabs(contents=[main_view], name="sam-3d-body-demo")
     return view
