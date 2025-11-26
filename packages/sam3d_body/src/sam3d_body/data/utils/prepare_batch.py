@@ -11,7 +11,7 @@ from torch import Tensor
 from torch.utils.data import default_collate
 
 
-class PreparedBatch(TypedDict, total=False):
+class PreparedBatchDict(TypedDict, total=False):
     img: Float[Tensor, "B N 3 H W"]
     img_size: Float[Tensor, "B N 2"]
     ori_img_size: Float[Tensor, "B N 2"]
@@ -38,7 +38,7 @@ def prepare_batch(
     masks: Float[ndarray, "n h w"] | None = None,
     masks_score: Float[ndarray, "n"] | None = None,
     cam_int: Float[Tensor, "B 3 3"] | None = None,
-) -> PreparedBatch:
+) -> PreparedBatchDict:
     """A helper function to prepare data batch for SAM 3D Body model inference."""
     height, width = img.shape[:2]
 
@@ -50,7 +50,7 @@ def prepare_batch(
         data_info["bbox_format"] = "xyxy"
 
         if masks is not None:
-            data_info["mask"] = masks[idx].copy()
+            data_info["mask"] = masks[idx].astype(np.float32, copy=False)
             if masks_score is not None:
                 data_info["mask_score"] = masks_score[idx]
             else:
@@ -96,4 +96,4 @@ def prepare_batch(
         ).to(batch["img"])
 
     batch["img_ori"] = [NoCollate(img)]
-    return cast(PreparedBatch, batch)
+    return cast(PreparedBatchDict, batch)

@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import math
-from typing import Tuple
 
 import cv2
 import numpy as np
@@ -42,9 +41,7 @@ def bbox_xywh2xyxy(bbox_xywh: np.ndarray) -> np.ndarray:
     return bbox_xyxy
 
 
-def bbox_xyxy2cs(
-    bbox: np.ndarray, padding: float = 1.0
-) -> Tuple[np.ndarray, np.ndarray]:
+def bbox_xyxy2cs(bbox: np.ndarray, padding: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
     """Transform the bbox format from (x,y,w,h) into (center, scale)
 
     Args:
@@ -76,9 +73,7 @@ def bbox_xyxy2cs(
     return center, scale
 
 
-def bbox_xywh2cs(
-    bbox: np.ndarray, padding: float = 1.0
-) -> Tuple[np.ndarray, np.ndarray]:
+def bbox_xywh2cs(bbox: np.ndarray, padding: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
     """Transform the bbox format from (x,y,w,h) into (center, scale)
 
     Args:
@@ -111,9 +106,7 @@ def bbox_xywh2cs(
     return center, scale
 
 
-def bbox_cs2xyxy(
-    center: np.ndarray, scale: np.ndarray, padding: float = 1.0
-) -> np.ndarray:
+def bbox_cs2xyxy(center: np.ndarray, scale: np.ndarray, padding: float = 1.0) -> np.ndarray:
     """Transform the bbox format from (center, scale) to (x1,y1,x2,y2).
 
     Args:
@@ -143,9 +136,7 @@ def bbox_cs2xyxy(
     return bbox
 
 
-def bbox_cs2xywh(
-    center: np.ndarray, scale: np.ndarray, padding: float = 1.0
-) -> np.ndarray:
+def bbox_cs2xywh(center: np.ndarray, scale: np.ndarray, padding: float = 1.0) -> np.ndarray:
     """Transform the bbox format from (center, scale) to (x,y,w,h).
 
     Args:
@@ -177,7 +168,7 @@ def bbox_cs2xywh(
 
 def flip_bbox(
     bbox: np.ndarray,
-    image_size: Tuple[int, int],
+    image_size: tuple[int, int],
     bbox_format: str = "xywh",
     direction: str = "horizontal",
 ) -> np.ndarray:
@@ -197,14 +188,10 @@ def flip_bbox(
         np.ndarray: The flipped bounding boxes.
     """
     direction_options = {"horizontal", "vertical", "diagonal"}
-    assert direction in direction_options, (
-        f'Invalid flipping direction "{direction}". ' f"Options are {direction_options}"
-    )
+    assert direction in direction_options, f'Invalid flipping direction "{direction}". Options are {direction_options}'
 
     format_options = {"xywh", "xyxy", "center"}
-    assert bbox_format in format_options, (
-        f'Invalid bbox format "{bbox_format}". ' f"Options are {format_options}"
-    )
+    assert bbox_format in format_options, f'Invalid bbox format "{bbox_format}". Options are {format_options}'
 
     bbox_flipped = bbox.copy()
     w, h = image_size
@@ -258,7 +245,7 @@ def get_udp_warp_matrix(
     center: np.ndarray,
     scale: np.ndarray,
     rot: float,
-    output_size: Tuple[int, int],
+    output_size: tuple[int, int],
 ) -> np.ndarray:
     """Calculate the affine transformation matrix under the unbiased
     constraint. See `UDP (CVPR 2020)`_ for details.
@@ -291,16 +278,12 @@ def get_udp_warp_matrix(
     warp_mat[0, 0] = math.cos(rot_rad) * scale_x
     warp_mat[0, 1] = -math.sin(rot_rad) * scale_x
     warp_mat[0, 2] = scale_x * (
-        -0.5 * input_size[0] * math.cos(rot_rad)
-        + 0.5 * input_size[1] * math.sin(rot_rad)
-        + 0.5 * scale[0]
+        -0.5 * input_size[0] * math.cos(rot_rad) + 0.5 * input_size[1] * math.sin(rot_rad) + 0.5 * scale[0]
     )
     warp_mat[1, 0] = math.sin(rot_rad) * scale_y
     warp_mat[1, 1] = math.cos(rot_rad) * scale_y
     warp_mat[1, 2] = scale_y * (
-        -0.5 * input_size[0] * math.sin(rot_rad)
-        - 0.5 * input_size[1] * math.cos(rot_rad)
-        + 0.5 * scale[1]
+        -0.5 * input_size[0] * math.sin(rot_rad) - 0.5 * input_size[1] * math.cos(rot_rad) + 0.5 * scale[1]
     )
     return warp_mat
 
@@ -309,8 +292,8 @@ def get_warp_matrix(
     center: np.ndarray,
     scale: np.ndarray,
     rot: float,
-    output_size: Tuple[int, int],
-    shift: Tuple[float, float] = (0.0, 0.0),
+    output_size: tuple[int, int],
+    shift: tuple[float, float] = (0.0, 0.0),
     inv: bool = False,
 ) -> np.ndarray:
     """Calculate the affine transformation matrix that can warp the bbox area

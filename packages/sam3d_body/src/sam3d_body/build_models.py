@@ -36,10 +36,7 @@ def load_sam_3d_body(
     model = SAM3DBody(model_cfg)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
+    state_dict = checkpoint.get("state_dict", checkpoint)
     load_state_dict(model, state_dict, strict=False)
 
     model = model.to(device)

@@ -1,8 +1,8 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-from collections.abc import Callable
-from typing import Any, Literal, TypedDict, cast
+"""Core inference utilities for SAM 3D Body model (hands + body fusion)."""
 
-import cv2
+from collections.abc import Callable
+from typing import Any, Literal, cast
+
 import numpy as np
 import torch
 from jaxtyping import Float, Int, UInt8
@@ -10,7 +10,6 @@ from numpy import ndarray
 from serde import from_dict, serde
 from torch import Tensor
 from torchvision.transforms import ToTensor
-from yacs.config import CfgNode
 
 from sam3d_body.data.transforms import (
     Compose,
@@ -18,7 +17,7 @@ from sam3d_body.data.transforms import (
     TopdownAffine,
     VisionTransformWrapper,
 )
-from sam3d_body.data.utils.prepare_batch import NoCollate, prepare_batch
+from sam3d_body.data.utils.prepare_batch import PreparedBatchDict, prepare_batch
 from sam3d_body.models.meta_arch import SAM3DBody
 from sam3d_body.models.meta_arch.sam3d_body import BodyPredContainer
 from sam3d_body.utils import recursive_to
@@ -26,87 +25,124 @@ from sam3d_body.utils import recursive_to
 
 @serde
 class PoseOutputsNP:
+    """Batch pose outputs in numpy form straight from the model forward pass."""
+
     pred_pose_raw: Float[ndarray, "n pose_raw=266"]
+    """Raw 266D pose vector per item (SMPL-X ordering)."""
     pred_pose_rotmat: Float[ndarray, ""] | None
+    """Optional rotation matrices derived from ``pred_pose_raw``."""
     global_rot: Float[ndarray, "n 3"]
+    """Root/global rotation in radians for each item (XYZ Euler)."""
     body_pose: Float[ndarray, "n body_pose_params=133"]
+    """Body pose parameters (133D continuous) per item."""
     shape: Float[ndarray, "n shape_params=45"]
+    """Body shape PCA coefficients (45D) per item."""
     scale: Float[ndarray, "n scale_params=28"]
+    """Body scale PCA coefficients (28D) per item."""
     hand: Float[ndarray, "n hand_pose_params=108"]
+    """Hand pose parameters in PCA space (108D) per item."""
     face: Float[ndarray, "n expr_params=72"]
+    """Facial expression PCA coefficients (72D) per item."""
     pred_keypoints_3d: Float[ndarray, "n joints3d 3"]
+    """3D keypoints in camera coordinates for each item."""
     pred_vertices: Float[ndarray, "n verts=18439 3"]
+    """Full mesh vertices in camera coordinates per item."""
     pred_joint_coords: Float[ndarray, "n joints3d 3"]
+    """Internal skeleton joint centers (camera coordinates) per item."""
     faces: Int[ndarray, "faces 3"]
+    """Mesh face indices shared across items."""
     joint_global_rots: Float[ndarray, "n joints_rot 3 3"]
+    """Global rotation matrices per joint for each item."""
     mhr_model_params: Float[ndarray, "n mhr_params"]
+    """Model hyper-regularization parameters per item."""
     pred_cam: Float[ndarray, "n 3"]
+    """Weak-perspective camera parameters (sx, sy, tx) per item."""
     pred_keypoints_2d_verts: Float[ndarray, "n verts 2"]
+    """2D projected vertices per item (pixels)."""
     pred_keypoints_2d: Float[ndarray, "n joints2d 2"]
+    """2D projected keypoints per item (pixels)."""
     pred_cam_t: Float[ndarray, "n 3"]
+    """Camera-space translation vectors applied to each mesh."""
     focal_length: Float[ndarray, "n"]
+    """Focal lengths per item (pixels)."""
     pred_keypoints_2d_depth: Float[ndarray, "n joints2d"]
+    """Depth values for 2D keypoints per item."""
     pred_keypoints_2d_cropped: Float[ndarray, "n joints2d 2"]
+    """2D keypoints in the cropped input frame per item (pixels)."""
 
 
-class PosePredictionDict(TypedDict, total=False):
+@serde
+class FinalPosePrediction:
+    """Per-person prediction bundle returned by SAM 3D Body."""
+
     bbox: Float[ndarray, "4"]
+    """Axis-aligned XYXY box in the original image (pixels)."""
     focal_length: Float[ndarray, ""]
+    """Scalar focal length for the frame (pixels)."""
     pred_keypoints_3d: Float[ndarray, "joints 3"]
+    """3D keypoints in camera coordinates (OpenCV: x right, y down, z forward)."""
     pred_keypoints_2d: Float[ndarray, "joints 2"]
+    """2D keypoints in image pixel coordinates."""
     pred_vertices: Float[ndarray, "verts 3"]
+    """Full body mesh vertices in camera coordinates."""
     pred_cam_t: Float[ndarray, "3"]
+    """Camera-space translation (x, y, z) applied to the mesh."""
     pred_pose_raw: Float[ndarray, "pose_params=266"]
-    global_rot: Float[ndarray, "3 3"]
+    """Raw 266D pose vector (SMPL-X style ordering)."""
+    global_rot: Float[ndarray, "3"]
+    """Root/global rotation in radians (XYZ Euler)."""
     body_pose_params: Float[ndarray, "body_pose_params=133"]
+    """Body pose parameters (133D continuous)."""
     hand_pose_params: Float[ndarray, "hand_pose_params=108"]
+    """Hand pose parameters (108D PCA space)."""
     scale_params: Float[ndarray, "scale_params=28"]
+    """Body scale PCA coefficients (28D)."""
     shape_params: Float[ndarray, "shape_params=45"]
+    """Body shape PCA coefficients (45D)."""
     expr_params: Float[ndarray, "expr_params=72"]
-    mask: UInt8[ndarray, "h w 1"] | None
-    pred_joint_coords: Float[ndarray, "joints 3"]
-    pred_global_rots: Float[ndarray, "joints 3 3"]
-    lhand_bbox: Float[ndarray, "4"]
-    rhand_bbox: Float[ndarray, "4"]
+    """Facial expression PCA coefficients (72D)."""
+    mask: UInt8[ndarray, "h w 1"] | None = None
+    """Optional instance segmentation mask (H×W×1, uint8)."""
+    pred_joint_coords: Float[ndarray, "joints 3"] | None = None
+    """Full internal skeleton joint centers (camera coordinates)."""
+    pred_global_rots: Float[ndarray, "joints 3 3"] | None = None
+    """Global rotation matrices per joint aligned with ``pred_joint_coords``."""
+    lhand_bbox: Float[ndarray, "4"] | None = None
+    """Optional left-hand XYXY box in the original image (pixels)."""
+    rhand_bbox: Float[ndarray, "4"] | None = None
+    """Optional right-hand XYXY box in the original image (pixels)."""
 
 
 Transform = Callable[[dict], dict | None]
 
 
 class SAM3DBodyEstimator:
+    """Wraps the SAM 3D Body meta-architecture for single-frame inference."""
+
     def __init__(
         self,
         sam_3d_body_model: SAM3DBody,
-        model_cfg: CfgNode,
-        human_detector=None,
-        human_segmentor=None,
-        fov_estimator=None,
     ) -> None:
+        """Initialize preprocessing pipelines and cache reusable assets.
+
+        Args:
+            sam_3d_body_model: Loaded ``SAM3DBody`` instance (checkpoints already restored).
+        """
         self.model: SAM3DBody = sam_3d_body_model
-        self.cfg: CfgNode = model_cfg
-        self.detector: Any | None = human_detector
-        self.sam: Any | None = human_segmentor
-        self.fov_estimator: Any | None = fov_estimator
         self.thresh_wrist_angle: float = 1.4
 
         # For mesh visualization
-        self.faces: Int[ndarray, "n_faces=36874 3"] = self.model.head_pose.faces.cpu().numpy()
+        self.faces: Int[ndarray, "n_faces=36874 3"] = self.model.head_pose.faces.cpu().numpy()  # type: ignore
 
-        if self.detector is None:
-            print("No human detector is used...")
-        if self.sam is None:
-            print("Mask-condition inference is not supported...")
-        if self.fov_estimator is None:
-            print("No FOV estimator... Using the default FOV!")
-
+        # Define transforms
         body_transforms: list[Transform] = [
             cast(Transform, GetBBoxCenterScale()),
-            cast(Transform, TopdownAffine(input_size=self.cfg.MODEL.IMAGE_SIZE, use_udp=False)),
+            cast(Transform, TopdownAffine(input_size=512, use_udp=False)),
             cast(Transform, VisionTransformWrapper(ToTensor())),
         ]
         hand_transforms: list[Transform] = [
             cast(Transform, GetBBoxCenterScale(padding=0.9)),
-            cast(Transform, TopdownAffine(input_size=self.cfg.MODEL.IMAGE_SIZE, use_udp=False)),
+            cast(Transform, TopdownAffine(input_size=512, use_udp=False)),
             cast(Transform, VisionTransformWrapper(ToTensor())),
         ]
 
@@ -117,110 +153,61 @@ class SAM3DBodyEstimator:
     def process_one_image(
         self,
         rgb_hw3: UInt8[ndarray, "h w 3"],
-        bboxes: Float[ndarray, "n 4"] | None = None,
-        masks: UInt8[ndarray, "n h w 1"] | None = None,
-        cam_int: Float[ndarray, "3 3"] | None = None,
-        det_cat_id: int = 0,
-        bbox_thr: float = 0.5,
-        nms_thr: float = 0.3,
-        use_mask: bool = False,
+        xyxy: Float[ndarray, "n 4"] | None = None,
+        masks: Float[ndarray, "n h w"] | None = None,
+        masks_score: Float[ndarray, "n"] | None = None,
+        K_33: Float[ndarray, "3 3"] | None = None,
         inference_type: Literal["full", "body", "hand"] = "full",
-    ) -> list[PosePredictionDict]:
-        """
-        Perform model prediction in top-down format: assuming input is a full image.
+    ) -> list[FinalPosePrediction]:
+        """Run full SAM 3D Body inference for one RGB frame.
 
         Args:
-            rgb_hw3: Input image as a numpy array in RGB format
-            bboxes: Optional pre-computed bounding boxes
-            masks: Optional pre-computed masks (numpy array). If provided, SAM2 will be skipped.
-            det_cat_id: Detection category ID
-            bbox_thr: Bounding box threshold
-            nms_thr: NMS threshold
-            inference_type:
-                - full: full-body inference with both body and hand decoders
-                - body: inference with body decoder only (still full-body output)
-                - hand: inference with hand decoder only (only hand output)
+            rgb_hw3: Input image in RGB order with dtype ``uint8`` and shape ``[H, W, 3]``.
+            xyxy: Optional person boxes (XYXY, pixels) to bypass detector; defaults to the
+                full-frame box when ``None``.
+            masks: Optional binary instance masks aligned with ``xyxy`` (shape ``[N, H, W]``);
+                when provided, segmentation is skipped.
+            masks_score: Optional confidence scores for ``masks``.
+            K_33: Optional camera intrinsic matrix ``[3, 3]``; if ``None``, the model will rely on
+                its default relative-FOV heuristic. Intrinsics follow the project convention
+                of mapping world points into the camera frame via ``cam_T_world`` style matrices.
+            inference_type: Controls which decoders run: ``"full"`` (body + hands), ``"body"``
+                (body-only), or ``"hand"`` (hand-only output paths).
+
+        Returns:
+            A list of ``FinalPosePrediction`` structures, one per detected person.
         """
 
-        # clear all cached results
-        self.batch: dict[str, Any] | None = None
-        self.image_embeddings: Any | None = None
-        self.output: Any | None = None
-        self.prev_prompt: list[Any] = []
-        torch.cuda.empty_cache()
+        height: int = rgb_hw3.shape[0]
+        width: int = rgb_hw3.shape[1]
 
-        height: int
-        width: int
-        height, width = rgb_hw3.shape[:2]
-
-        if bboxes is not None:
-            boxes: Float[ndarray, "n 4"] = bboxes.reshape(-1, 4).astype(np.float32)
-        elif self.detector is not None:
-            bgr_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(rgb_hw3, cv2.COLOR_RGB2BGR)  # RGB to BGR
-            print("Running object detector...")
-            boxes: Float[ndarray, "n 4"] = self.detector.run_human_detection(
-                bgr_hw3,
-                det_cat_id=det_cat_id,
-                bbox_thr=bbox_thr,
-                nms_thr=nms_thr,
-                default_to_full_image=False,
-            ).astype(np.float32)
-            print("Found boxes:", boxes)
-        else:
-            boxes: Float[ndarray, "n=1 4"] = np.array([0, 0, width, height], dtype=np.float32).reshape(1, 4)
+        if xyxy is None:
+            xyxy = np.array([0, 0, width, height], dtype=np.float32).reshape(1, 4)
 
         # If there are no detected humans, don't run prediction
-        if len(boxes) == 0:
+        if len(xyxy) == 0:
             return []
 
         # number of people detected
-        n_dets: int = boxes.shape[0]
-
-        # Handle masks - either provided externally or generated via SAM2
-        masks_score: Float[ndarray, "n"] | None = None
-        if masks is not None:
-            # Use provided masks - ensure they match the number of detected boxes
-            print(f"Using provided masks: {masks.shape}")
-            assert bboxes is not None, "Mask-conditioned inference requires bboxes input!"
-            masks = masks.reshape(-1, height, width, 1).astype(np.uint8)
-            masks_score = np.ones(len(masks), dtype=np.float32)  # Set high confidence for provided masks
-            use_mask = True
-        elif use_mask and self.sam is not None:
-            print("Running SAM to get mask from bbox...")
-            # Generate masks using SAM2
-            masks, masks_score = self.sam.run_sam(rgb_hw3, boxes)
-        else:
-            masks, masks_score = None, None
+        n_dets: int = xyxy.shape[0]
 
         #################### Construct batch data samples ####################
-        batch: dict[str, Any] = cast(
-            dict[str, Any],
-            prepare_batch(rgb_hw3, self.transform, boxes, masks, masks_score),
-        )
+        batch: PreparedBatchDict = prepare_batch(rgb_hw3, self.transform, xyxy, masks, masks_score)
 
         #################### Run model inference on an image ####################
-        batch = cast(dict[str, Any], recursive_to(batch, "cuda"))
+        batch: PreparedBatchDict = recursive_to(batch, "cuda")
         self.model._initialize_batch(batch)
         batch_img: Float[Tensor, "B=1 N 3 H W"] = batch["img"]
 
         # Handle camera intrinsics
         # - either provided externally or generated via default FOV estimator
-        cam_int_tensor: Tensor
-        if cam_int is not None:
-            print("Using provided camera intrinsics...")
-            cam_int_tensor = torch.as_tensor(cam_int, device=batch_img.device, dtype=batch_img.dtype)
-            batch["cam_int"] = cam_int_tensor.clone()
-        elif self.fov_estimator is not None:
-            print("Running FOV estimator ...")
-            input_image: ndarray = cast(list[NoCollate], batch["img_ori"])[0].data
-            cam_int_pred: Tensor | ndarray = self.fov_estimator.get_cam_intrinsics(input_image)
-            if isinstance(cam_int_pred, ndarray):
-                cam_int_tensor = torch.as_tensor(cam_int_pred, device=batch_img.device, dtype=batch_img.dtype)
-            else:
-                cam_int_tensor = cast(Tensor, cam_int_pred).to(batch_img)
-            batch["cam_int"] = cam_int_tensor.clone()
+        if K_33 is None:
+            print("")
         else:
-            cam_int_tensor = cast(Tensor, batch["cam_int"]).clone()
+            K_b33: Float[Tensor, "b=1 3 3"] = torch.as_tensor(
+                K_33[np.newaxis, ...], device=batch_img.device, dtype=batch_img.dtype
+            )
+            batch["cam_int"] = K_b33.clone()
 
         outputs: BodyPredContainer = self.model.run_inference(
             rgb_hw3,
@@ -237,33 +224,39 @@ class SAM3DBodyEstimator:
         out_np_dict: dict[str, ndarray] = cast(dict[str, ndarray], recursive_to(recursive_to(mhr_dict, "cpu"), "numpy"))
         out_np: PoseOutputsNP = from_dict(PoseOutputsNP, out_np_dict)
 
-        all_out: list[PosePredictionDict] = []
+        all_out: list[FinalPosePrediction] = []
         bbox_tensor: Float[Tensor, "B=1 N 4"] = batch["bbox"]
 
         for idx in range(n_dets):
-            pred: PosePredictionDict = {
-                "bbox": bbox_tensor[0, idx].cpu().numpy(),
-                "focal_length": out_np.focal_length[idx],
-                "pred_keypoints_3d": out_np.pred_keypoints_3d[idx],
-                "pred_keypoints_2d": out_np.pred_keypoints_2d[idx],
-                "pred_vertices": out_np.pred_vertices[idx],
-                "pred_cam_t": out_np.pred_cam_t[idx],
-                "pred_pose_raw": out_np.pred_pose_raw[idx],
-                "global_rot": out_np.global_rot[idx],
-                "body_pose_params": out_np.body_pose[idx],
-                "hand_pose_params": out_np.hand[idx],
-                "scale_params": out_np.scale[idx],
-                "shape_params": out_np.shape[idx],
-                "expr_params": out_np.face[idx],
-                "mask": masks[idx] if masks is not None else None,
-                "pred_joint_coords": out_np.pred_joint_coords[idx],
-                "pred_global_rots": out_np.joint_global_rots[idx],
-            }
+            mask_arr: UInt8[ndarray, "h w 1"] | None = None
+            if masks is not None:
+                mask_arr = masks[idx]
+                if mask_arr.ndim == 2:
+                    mask_arr = mask_arr[..., np.newaxis]
+                mask_arr = (mask_arr > 0.5).astype(np.uint8, copy=False)
+            pred = FinalPosePrediction(
+                bbox=bbox_tensor[0, idx].cpu().numpy(),
+                focal_length=np.asarray(out_np.focal_length[idx]),
+                pred_keypoints_3d=out_np.pred_keypoints_3d[idx],
+                pred_keypoints_2d=out_np.pred_keypoints_2d[idx],
+                pred_vertices=out_np.pred_vertices[idx],
+                pred_cam_t=out_np.pred_cam_t[idx],
+                pred_pose_raw=out_np.pred_pose_raw[idx],
+                global_rot=out_np.global_rot[idx],
+                body_pose_params=out_np.body_pose[idx],
+                hand_pose_params=out_np.hand[idx],
+                scale_params=out_np.scale[idx],
+                shape_params=out_np.shape[idx],
+                expr_params=out_np.face[idx],
+                mask=mask_arr,
+                pred_joint_coords=out_np.pred_joint_coords[idx],
+                pred_global_rots=out_np.joint_global_rots[idx],
+            )
 
             if inference_type == "full" and batch_lhand is not None and batch_rhand is not None:
-                lhand_center: Tensor = cast(Tensor, batch_lhand["bbox_center"]).flatten(0, 1)[idx]
-                lhand_scale: Tensor = cast(Tensor, batch_lhand["bbox_scale"]).flatten(0, 1)[idx]
-                pred["lhand_bbox"] = np.array(
+                lhand_center = batch_lhand["bbox_center"].flatten(0, 1)[idx]
+                lhand_scale = batch_lhand["bbox_scale"].flatten(0, 1)[idx]
+                pred.lhand_bbox = np.array(
                     [
                         (lhand_center[0] - lhand_scale[0] / 2).item(),
                         (lhand_center[1] - lhand_scale[1] / 2).item(),
@@ -272,9 +265,9 @@ class SAM3DBodyEstimator:
                     ]
                 )
 
-                rhand_center: Tensor = cast(Tensor, batch_rhand["bbox_center"]).flatten(0, 1)[idx]
-                rhand_scale: Tensor = cast(Tensor, batch_rhand["bbox_scale"]).flatten(0, 1)[idx]
-                pred["rhand_bbox"] = np.array(
+                rhand_center = batch_rhand["bbox_center"].flatten(0, 1)[idx]
+                rhand_scale = batch_rhand["bbox_scale"].flatten(0, 1)[idx]
+                pred.rhand_bbox = np.array(
                     [
                         (rhand_center[0] - rhand_scale[0] / 2).item(),
                         (rhand_center[1] - rhand_scale[1] / 2).item(),

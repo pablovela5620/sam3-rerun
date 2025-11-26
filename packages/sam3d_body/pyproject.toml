@@ -16,8 +16,10 @@ dependencies = [
     "braceexpand>=0.1.7,<0.2",
     "roma>=1.5.4,<2",
     "pytorch-lightning>=2.5.6,<3",
-    "pyrender>=0.1.45,<0.2",
-    "moge @ git+https://github.com/microsoft/MoGe.git",
+    "yacs>=0.1.8,<0.2",
+    "omegaconf>=2.3.0,<3",
+    "termcolor>=3.2.0,<4",
+    "gradio-rerun>=0.27.0",
 ]
 name = "sam3d_body"
 requires-python = ">= 3.12"
@@ -41,15 +43,14 @@ no-build-isolation = ["detectron2", "moge"]
 [tool.pixi.pypi-options.dependency-overrides]
 # Allow iopath >=0.1.10 even though detectron2 pins <0.1.10, so it can satisfy sam-2.
 iopath = ">=0.1.10"
+gradio = ">=5.45.0,<6"
 [tool.pixi.pypi-dependencies]
 sam3d_body = { path = ".", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git" }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", branch = "main" }
-detectron2 = { git = "https://github.com/facebookresearch/detectron2.git", rev = "main" }
-sam-2 = { git = "https://github.com/facebookresearch/sam2.git", rev = "main" }
 timm = ">=0.9"
 transformers = { git = "https://github.com/huggingface/transformers.git", rev = "main" }
+monopriors = { git = "https://github.com/pablovela5620/monoprior.git" }
 
 [tool.pixi.tasks]
 
