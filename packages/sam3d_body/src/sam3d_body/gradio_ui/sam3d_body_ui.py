@@ -9,6 +9,7 @@ import os
 import tempfile
 from pathlib import Path
 
+import cv2
 import gradio as gr
 import rerun as rr
 import rerun.blueprint as rrb
@@ -28,6 +29,14 @@ mesh_faces: Int[ndarray, "n_faces=36874 3"] = MODEL_E2E.sam3d_body_estimator.fac
 
 @rr.thread_local_stream("sam3d_body_gradio_ui")
 def sam3d_prediction_fn(rgb_hw3: UInt8[ndarray, "h w 3"], pending_cleanup, log_relative_depth: bool) -> tuple[str, str]:
+    # resize rgb so that its largest dimension is 1024
+    rgb_hw3 = cv2.resize(
+        rgb_hw3,
+        dsize=(0, 0),
+        fx=1024 / max(rgb_hw3.shape[0], rgb_hw3.shape[1]),
+        fy=1024 / max(rgb_hw3.shape[0], rgb_hw3.shape[1]),
+        interpolation=cv2.INTER_AREA,
+    )
     # We eventually want to clean up the RRD file after it's sent to the viewer, so tracking
     # any pending files to be cleaned up when the state is deleted.
     temp = tempfile.NamedTemporaryFile(prefix="cube_", suffix=".rrd", delete=False)
