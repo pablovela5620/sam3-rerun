@@ -75,7 +75,7 @@ def main():
         with gr.Row():
             with gr.Column(scale=1):
                 img = gr.Image(interactive=True, label="Image", type="numpy", image_mode="RGB")
-                log_relative_depth_checkbox = gr.Checkbox(label="Log relative depth", value=False)
+                depth_checkbox = gr.Checkbox(label="Log relative depth", value=False)
                 create_rrd = gr.Button("Create RRD")
                 json_output = gr.Text()
             with gr.Column(scale=5):
@@ -90,7 +90,7 @@ def main():
                 )
         create_rrd.click(
             sam3d_prediction_fn,
-            inputs=[img, pending_cleanup, log_relative_depth_checkbox],
+            inputs=[img, pending_cleanup, depth_checkbox],
             outputs=[viewer, json_output],
         )
     return demo
