@@ -605,7 +605,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/d6/14/fc04d491527b774ec7479897f5861959209de1480e4c4cd32ed098ff8bea/timm-1.0.22-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/c6/dc3a0db5a6766416c32c034286d7c2d406da1f498e4de04ab1b8959edd00/tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/02/21/aa0f434434c48490f91b65962b1ce863fdcce63febc166ca9fe9d706c2b6/torchmetrics-1.8.2-py3-none-any.whl
-      - pypi: git+https://github.com/huggingface/transformers.git?rev=main#8d9923aaca74b88a74132839aa8f9ec3ded455f1
+      - pypi: git+https://github.com/huggingface/transformers.git?rev=main#d08b98b965176ea9cf8c8e8b24995c955b7e2ec9
       - pypi: https://files.pythonhosted.org/packages/ec/81/951a108396aa850a096be95cd9ccd38ef9f33ae35b40b512be975e2c994d/trimesh-4.10.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/7a/882d99539b19b1490cac5d77c67338d126e4122c8276bf640e411650c830/twine-6.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1b/a9/e3aee762739c1d7528da1c3e06d518503f8b6c439c35549b53735ba52ead/typeguard-4.4.4-py3-none-any.whl
@@ -1134,7 +1134,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/d6/14/fc04d491527b774ec7479897f5861959209de1480e4c4cd32ed098ff8bea/timm-1.0.22-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/c6/dc3a0db5a6766416c32c034286d7c2d406da1f498e4de04ab1b8959edd00/tokenizers-0.22.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/02/21/aa0f434434c48490f91b65962b1ce863fdcce63febc166ca9fe9d706c2b6/torchmetrics-1.8.2-py3-none-any.whl
-      - pypi: git+https://github.com/huggingface/transformers.git?rev=main#8d9923aaca74b88a74132839aa8f9ec3ded455f1
+      - pypi: git+https://github.com/huggingface/transformers.git?rev=main#d08b98b965176ea9cf8c8e8b24995c955b7e2ec9
       - pypi: https://files.pythonhosted.org/packages/ec/81/951a108396aa850a096be95cd9ccd38ef9f33ae35b40b512be975e2c994d/trimesh-4.10.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/7a/882d99539b19b1490cac5d77c67338d126e4122c8276bf640e411650c830/twine-6.2.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1b/a9/e3aee762739c1d7528da1c3e06d518503f8b6c439c35549b53735ba52ead/typeguard-4.4.4-py3-none-any.whl
@@ -7827,7 +7827,7 @@ packages:
   - pkg:pypi/tqdm?source=hash-mapping
   size: 89498
   timestamp: 1735661472632
-- pypi: git+https://github.com/huggingface/transformers.git?rev=main#8d9923aaca74b88a74132839aa8f9ec3ded455f1
+- pypi: git+https://github.com/huggingface/transformers.git?rev=main#d08b98b965176ea9cf8c8e8b24995c955b7e2ec9
   name: transformers
   version: 5.0.0.dev0
   requires_dist:
@@ -7873,6 +7873,7 @@ packages:
   - uvicorn ; extra == 'serving'
   - fastapi ; extra == 'serving'
   - starlette ; extra == 'serving'
+  - rich ; extra == 'serving'
   - torch>=2.2 ; extra == 'serving'
   - accelerate>=1.1.0 ; extra == 'serving'
   - librosa ; extra == 'audio'
@@ -7938,6 +7939,7 @@ packages:
   - uvicorn ; extra == 'testing'
   - fastapi ; extra == 'testing'
   - starlette ; extra == 'testing'
+  - rich ; extra == 'testing'
   - torch>=2.2 ; extra == 'testing'
   - accelerate>=1.1.0 ; extra == 'testing'
   - deepspeed>=0.9.3 ; extra == 'deepspeed-testing'
@@ -7976,6 +7978,7 @@ packages:
   - uvicorn ; extra == 'deepspeed-testing'
   - fastapi ; extra == 'deepspeed-testing'
   - starlette ; extra == 'deepspeed-testing'
+  - rich ; extra == 'deepspeed-testing'
   - torch>=2.2 ; extra == 'deepspeed-testing'
   - accelerate>=1.1.0 ; extra == 'deepspeed-testing'
   - optuna ; extra == 'deepspeed-testing'
@@ -8047,6 +8050,7 @@ packages:
   - uvicorn ; extra == 'dev-torch'
   - fastapi ; extra == 'dev-torch'
   - starlette ; extra == 'dev-torch'
+  - rich ; extra == 'dev-torch'
   - torch>=2.2 ; extra == 'dev-torch'
   - accelerate>=1.1.0 ; extra == 'dev-torch'
   - torch>=2.2 ; extra == 'dev-torch'
@@ -8142,6 +8146,7 @@ packages:
   - uvicorn ; extra == 'dev'
   - fastapi ; extra == 'dev'
   - starlette ; extra == 'dev'
+  - rich ; extra == 'dev'
   - torch>=2.2 ; extra == 'dev'
   - accelerate>=1.1.0 ; extra == 'dev'
   - datasets>=2.15.0 ; extra == 'dev'

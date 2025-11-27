@@ -22,7 +22,7 @@ from transformers.models.sam3 import Sam3Model, Sam3Processor
 from yacs.config import CfgNode
 
 from sam3d_body.api.visualization import create_view, set_annotation_context, visualize_sample
-from sam3d_body.build_models import load_sam_3d_body
+from sam3d_body.build_models import load_sam_3d_body, load_sam_3d_body_hf
 from sam3d_body.models.meta_arch import SAM3DBody
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction, SAM3DBodyEstimator
 
@@ -116,11 +116,12 @@ class SAM3DBodyE2E:
         self.sam3_predictor = SAM3Predictor(config.sam3_config)
         self.fov_predictor: BaseRelativePredictor = get_relative_predictor(config.fov_estimator)(device="cuda")
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body(
-            config.checkpoint_path,
-            device=device,
-            mhr_path=config.mhr_path,
-        )
+        # load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body(
+        #     config.checkpoint_path,
+        #     device=device,
+        #     mhr_path=config.mhr_path,
+        # )
+        load_output: tuple[SAM3DBody, CfgNode] = load_sam_3d_body_hf(repo_id="facebook/sam-3d-body-dinov3")
         model: SAM3DBody = load_output[0]
         self.sam3d_body_estimator = SAM3DBodyEstimator(
             sam_3d_body_model=model,
